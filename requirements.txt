@@ -1,0 +1,7 @@
+numpy
+pandas
+scipy
+scikit-learn
+anndata
+scanpy
+pertpy==1.0.6
