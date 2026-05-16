@@ -30,3 +30,13 @@ pip install -r requirements.txt
 ```
 
 Then run the notebook in `notebooks/`.
+
+## Extra metrics in `compute_metrics_space`
+
+Supported space-aware extras:
+- `pcc_delta`
+- `top_deg_recall`
+- `top_deg_precision`
+- `deg_direction_agreement`
+- `deg_spearman_lfc`
+- `pds_cosine` (cosine-only perturbation discrimination score)
