@@ -171,6 +171,13 @@ def compute_metrics(
         if real_x.shape[0] == 0 or pred_x.shape[0] == 0:
             continue
 
+        row = {
+            "condition": condition[0],
+            "n_real": int(real_x.shape[0]),
+            "n_pred": int(pred_x.shape[0]),
+            "n_genes": int(real_x.shape[1]),
+        }
+
         for metric in metrics:
             if metric in VECTOR_METRICS:
                 score = _vector_metric(metric, real_x, pred_x)
@@ -179,16 +186,9 @@ def compute_metrics(
             else:
                 raise ValueError(f"Unsupported metric: {metric}")
 
-            rows.append(
-                {
-                    "condition": condition[0],
-                    "metric": metric,
-                    "score": score,
-                    "n_real": int(real_x.shape[0]),
-                    "n_pred": int(pred_x.shape[0]),
-                    "n_genes": int(real_x.shape[1]),
-                }
-            )
+            row[metric] = score
+
+        rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -238,7 +238,13 @@ def main() -> None:
 
     print(f"Wrote {len(df)} rows to {out}")
     if not df.empty:
-        summary = df.groupby("metric", as_index=False)["score"].mean().rename(columns={"score": "mean_score"})
+        present_metrics = [m for m in args.metrics if m in df.columns]
+        summary = pd.DataFrame(
+            {
+                "metric": present_metrics,
+                "mean_score": [float(df[m].mean()) for m in present_metrics],
+            }
+        )
         print("\nMean score per metric:")
         print(summary.to_string(index=False))
 
