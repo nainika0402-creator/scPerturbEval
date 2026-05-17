@@ -52,6 +52,13 @@ def run_baseline(
     adata_all, adata_train, adata_test, _meta = load_preprocessed_norman(processed_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    shared_genes = adata_train.var_names.intersection(adata_test.var_names)
+    if len(shared_genes) == 0:
+        raise ValueError("No shared genes between preprocessed train and test data.")
+
+    adata_train = adata_train[:, shared_genes].copy()
+    adata_test = adata_test[:, shared_genes].copy()
+
     train_x = _to_dense(adata_train.X)
     test_x = _to_dense(adata_test.X)
     test_obs = adata_test.obs.copy()
