@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from scipy.spatial.distance import cosine as cosine_distance_fn
+from scipy.stats import ttest_ind
 from scipy.stats import pearsonr
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
@@ -22,6 +22,11 @@ SPACE_EXTRA_METRICS = {
     "deg_direction_agreement",
     "deg_spearman_lfc",
     "pds_cosine",
+    "cosine_logfc_rank",
+    "matrix_distance",
+    "wmse",
+    "weighted_r2_delta",
+    "pearson_delta_pert",
 }
 
 
@@ -111,8 +116,143 @@ def _rank_norm_score(distances: np.ndarray, correct_idx: int) -> float:
     rank = int(np.flatnonzero(order == correct_idx)[0])
     n = int(distances.shape[0])
     if n <= 1:
+        return np.nan
+    return float(1.0 - (rank / (n - 1)))
+
+
+def _cosine_distance_safe(a: np.ndarray, b: np.ndarray) -> float:
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
         return 1.0
-    return float(1.0 - (rank / n))
+    sim = float(np.dot(a, b) / (na * nb))
+    return float(1.0 - sim)
+
+
+def _cosine_similarity_safe(a: np.ndarray, b: np.ndarray) -> float:
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def _compute_deltas(
+    tx_real: np.ndarray,
+    tx_pred: np.ndarray,
+    tx_ctrl_real: np.ndarray,
+    tx_ctrl_pred: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    delta_real = _safe_mean(tx_real) - _safe_mean(tx_ctrl_real)
+    delta_pred = _safe_mean(tx_pred) - _safe_mean(tx_ctrl_pred)
+    return delta_real, delta_pred
+
+
+def _wmse(real_vec: np.ndarray, pred_vec: np.ndarray, weight_vec: np.ndarray) -> float:
+    wsum = float(np.sum(weight_vec))
+    if wsum == 0.0:
+        return np.nan
+    w = weight_vec / wsum
+    return float(np.sum(w * (real_vec - pred_vec) ** 2))
+
+
+def _weighted_r2_delta(
+    real_vec: np.ndarray,
+    pred_vec: np.ndarray,
+    mu_all: np.ndarray,
+    weight_vec: np.ndarray,
+) -> float:
+    wsum = float(np.sum(weight_vec))
+    if wsum == 0.0:
+        return np.nan
+    w = weight_vec / wsum
+    delta_real = real_vec - mu_all
+    delta_pred = pred_vec - mu_all
+    delta_bar = float(np.sum(w * delta_real))
+    residual = float(np.sum(w * (delta_real - delta_pred) ** 2))
+    total = float(np.sum(w * (delta_real - delta_bar) ** 2))
+    if total == 0.0:
+        return np.nan
+    return float(1.0 - (residual / total))
+
+
+def _pearson_delta_pert(real_vec: np.ndarray, pred_vec: np.ndarray, mu_all: np.ndarray) -> float:
+    delta_real = real_vec - mu_all
+    delta_pred = pred_vec - mu_all
+    if float(np.std(delta_real)) == 0.0 or float(np.std(delta_pred)) == 0.0:
+        return np.nan
+    corr = pearsonr(delta_real, delta_pred)[0]
+    return float(corr) if not np.isnan(corr) else np.nan
+
+
+def _deg_weights_condition_vs_rest(
+    cond_real_x: np.ndarray,
+    rest_real_x: np.ndarray,
+) -> np.ndarray:
+    if cond_real_x.shape[1] != rest_real_x.shape[1]:
+        raise ValueError("Condition/rest matrices have different gene dimensions.")
+    if cond_real_x.shape[0] == 0 or rest_real_x.shape[0] == 0:
+        return np.zeros(cond_real_x.shape[1], dtype=float)
+
+    t_stat, _ = ttest_ind(cond_real_x, rest_real_x, axis=0, equal_var=False, nan_policy="omit")
+    scores = np.abs(np.asarray(t_stat, dtype=float))
+    scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+    smin = float(np.min(scores))
+    smax = float(np.max(scores))
+    scores = (scores - smin) / (smax - smin + 1e-12)
+    weights = scores**2
+    wsum = float(np.sum(weights))
+    if wsum == 0.0:
+        return np.zeros_like(weights)
+    return weights / wsum
+
+
+def _cosine_logfc_rank(
+    labels: list[str],
+    cond_to_delta_real: dict[str, np.ndarray],
+    cond_to_delta_pred: dict[str, np.ndarray],
+) -> float:
+    n = len(labels)
+    if n <= 1:
+        return np.nan
+
+    ranks: list[float] = []
+    for i, cond_i in enumerate(labels):
+        if cond_i not in cond_to_delta_real or cond_i not in cond_to_delta_pred:
+            continue
+        d_match = _cosine_distance_safe(cond_to_delta_pred[cond_i], cond_to_delta_real[cond_i])
+        count = 0
+        for j, cond_j in enumerate(labels):
+            if i == j:
+                continue
+            if cond_j not in cond_to_delta_pred:
+                continue
+            d_j = _cosine_distance_safe(cond_to_delta_pred[cond_j], cond_to_delta_real[cond_i])
+            if d_j <= d_match:
+                count += 1
+        ranks.append(float(count / (n - 1)))
+
+    if len(ranks) == 0:
+        return np.nan
+    return float(np.mean(ranks))
+
+
+def _matrix_distance_from_deltas(
+    labels: list[str],
+    cond_to_delta_real: dict[str, np.ndarray],
+    cond_to_delta_pred: dict[str, np.ndarray],
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
+    n = len(labels)
+    s_pred = np.zeros((n, n), dtype=float)
+    s_real = np.zeros((n, n), dtype=float)
+    for i, li in enumerate(labels):
+        for j, lj in enumerate(labels):
+            s_pred[i, j] = _cosine_similarity_safe(cond_to_delta_pred[li], cond_to_delta_pred[lj])
+            s_real[i, j] = _cosine_similarity_safe(cond_to_delta_real[li], cond_to_delta_real[lj])
+    diff = s_pred - s_real
+    dist_raw = float(np.linalg.norm(diff, ord="fro"))
+    dist_norm = float(dist_raw / max(1, n))
+    return dist_norm, dist_raw, s_pred, s_real, diff
 
 
 def compute_metrics_with_space(
@@ -147,14 +287,24 @@ def compute_metrics_with_space(
 
     ctrl_real_x = None
     ctrl_pred_x = None
-    needs_control = (
-        space == "deg" or any(m in SPACE_EXTRA_METRICS for m in metrics)
-    )
+    control_ref_metrics = {
+        "pcc_delta",
+        "top_deg_recall",
+        "top_deg_precision",
+        "deg_direction_agreement",
+        "deg_spearman_lfc",
+        "pds_cosine",
+        "cosine_logfc_rank",
+        "matrix_distance",
+    }
+    pert_ref_metrics = {"wmse", "weighted_r2_delta", "pearson_delta_pert"}
+    needs_control = (space == "deg") or any(m in control_ref_metrics for m in metrics)
     if needs_control and control_label is None:
         raise ValueError(
             "control_label is required for DEG space and delta/DEG metrics "
             "(pcc_delta, top_deg_recall, top_deg_precision, "
-            "deg_direction_agreement, deg_spearman_lfc, pds_cosine)."
+            "deg_direction_agreement, deg_spearman_lfc, pds_cosine, "
+            "cosine_logfc_rank, matrix_distance)."
         )
 
     if control_label is not None and needs_control:
@@ -175,8 +325,15 @@ def compute_metrics_with_space(
 
     rows: List[Dict] = []
     wants_pds = "pds_cosine" in metrics
+    wants_cosine_logfc_rank = "cosine_logfc_rank" in metrics
+    wants_matrix_distance = "matrix_distance" in metrics
+    wants_delta_collection = wants_pds or wants_cosine_logfc_rank or wants_matrix_distance
     cond_to_delta_real: dict[str, np.ndarray] = {}
     cond_to_delta_pred: dict[str, np.ndarray] = {}
+    cond_to_real_mean: dict[str, np.ndarray] = {}
+    cond_to_pred_mean: dict[str, np.ndarray] = {}
+    cond_to_weight: dict[str, np.ndarray] = {}
+    pert_metric_conditions: list[str] = []
 
     for condition in conditions:
         real_x, pred_x = extract_condition_matrices(pair, split=split, condition=condition, dense_mode="on_extract")
@@ -219,11 +376,15 @@ def compute_metrics_with_space(
             "n_pred": int(pred_x.shape[0]),
             "n_genes_aligned": int(real_x.shape[1]),
             "n_features_eval": int(n_features),
+            "deg_fallback_used": bool(space == "deg" and (deg_mask is None or int(deg_mask.sum()) == 0)),
         }
+        is_control_condition = bool(
+            control_label is not None and str(condition[0]).lower() == str(control_label).lower()
+        )
 
         for metric in metrics:
             if metric in SPACE_EXTRA_METRICS:
-                if metric in {"pcc_delta", "top_deg_recall", "top_deg_precision", "deg_direction_agreement", "deg_spearman_lfc"} and space == "pca":
+                if metric in control_ref_metrics and space == "pca":
                     raise ValueError(
                         f"Metric '{metric}' is not supported in PCA space because gene identity is not preserved."
                     )
@@ -235,26 +396,38 @@ def compute_metrics_with_space(
                     raise ValueError(
                         f"Metric '{metric}' requires control-transformed matrices in non-PCA space."
                     )
+                if is_control_condition:
+                    row[metric] = np.nan
+                    continue
 
-                delta_real = _safe_mean(tx_real) - _safe_mean(tx_ctrl_real)
-                delta_pred = _safe_mean(tx_pred) - _safe_mean(tx_ctrl_pred)
-                if wants_pds:
-                    cond_to_delta_real[condition[0]] = delta_real
-                    cond_to_delta_pred[condition[0]] = delta_pred
+                if metric in control_ref_metrics:
+                    delta_real, delta_pred = _compute_deltas(
+                        tx_real=tx_real,
+                        tx_pred=tx_pred,
+                        tx_ctrl_real=tx_ctrl_real,
+                        tx_ctrl_pred=tx_ctrl_pred,
+                    )
+                    if wants_delta_collection:
+                        cond_to_delta_real[condition[0]] = delta_real
+                        cond_to_delta_pred[condition[0]] = delta_pred
 
-                if metric == "pcc_delta":
-                    corr = pearsonr(delta_real, delta_pred)[0]
-                    score = float(corr) if not np.isnan(corr) else np.nan
-                elif metric in {"top_deg_recall", "top_deg_precision"}:
-                    recall, precision = _top_deg_recall_precision(delta_real, delta_pred, top_k_deg)
-                    score = recall if metric == "top_deg_recall" else precision
-                elif metric == "deg_direction_agreement":
-                    score = _direction_agreement(delta_real, delta_pred)
-                elif metric == "deg_spearman_lfc":
-                    corr = spearmanr(delta_real, delta_pred)[0]
-                    score = float(corr) if not np.isnan(corr) else np.nan
-                elif metric == "pds_cosine":
-                    # Placeholder; computed after all conditions are processed.
+                    if metric == "pcc_delta":
+                        corr = pearsonr(delta_real, delta_pred)[0]
+                        score = float(corr) if not np.isnan(corr) else np.nan
+                    elif metric in {"top_deg_recall", "top_deg_precision"}:
+                        recall, precision = _top_deg_recall_precision(delta_real, delta_pred, top_k_deg)
+                        score = recall if metric == "top_deg_recall" else precision
+                    elif metric == "deg_direction_agreement":
+                        score = _direction_agreement(delta_real, delta_pred)
+                    elif metric == "deg_spearman_lfc":
+                        corr = spearmanr(delta_real, delta_pred)[0]
+                        score = float(corr) if not np.isnan(corr) else np.nan
+                    elif metric in {"pds_cosine", "cosine_logfc_rank", "matrix_distance"}:
+                        score = np.nan
+                    else:
+                        raise ValueError(f"Unsupported metric: {metric}")
+                elif metric in pert_ref_metrics:
+                    # Defer to global post-pass (requires mu_all and per-condition weights).
                     score = np.nan
                 else:
                     raise ValueError(f"Unsupported metric: {metric}")
@@ -269,27 +442,109 @@ def compute_metrics_with_space(
 
         rows.append(row)
 
-    if wants_pds and len(rows) > 0:
-        labels = [r["condition"] for r in rows]
-        for i, cond in enumerate(labels):
-            if cond not in cond_to_delta_pred or cond not in cond_to_delta_real:
-                continue
-            pred_eff = cond_to_delta_pred[cond]
-            dists = []
-            for other_cond in labels:
-                real_eff = cond_to_delta_real.get(other_cond)
-                if real_eff is None:
-                    dists.append(np.nan)
-                    continue
-                d = cosine_distance_fn(pred_eff, real_eff)
-                dists.append(float(d) if not np.isnan(d) else np.inf)
-            dists_arr = np.asarray(dists, dtype=float)
-            if not np.any(np.isfinite(dists_arr)):
-                rows[i]["pds_cosine"] = np.nan
-                continue
-            rows[i]["pds_cosine"] = _rank_norm_score(dists_arr, correct_idx=i)
+        if not is_control_condition:
+            cond_name = condition[0]
+            cond_to_real_mean[cond_name] = _safe_mean(tx_real)
+            cond_to_pred_mean[cond_name] = _safe_mean(tx_pred)
+            pert_metric_conditions.append(cond_name)
 
-    return pd.DataFrame(rows)
+    if any(m in pert_ref_metrics for m in metrics) and len(pert_metric_conditions) > 0:
+        valid_conds = [c for c in pert_metric_conditions if c in cond_to_real_mean and c in cond_to_pred_mean]
+        if len(valid_conds) > 0:
+            real_stack = np.stack([cond_to_real_mean[c] for c in valid_conds], axis=0)
+            mu_all = np.mean(real_stack, axis=0)
+
+            for c in valid_conds:
+                rest = [x for x in valid_conds if x != c]
+                if len(rest) == 0:
+                    cond_to_weight[c] = np.zeros_like(cond_to_real_mean[c], dtype=float)
+                else:
+                    cond_real_vec = cond_to_real_mean[c][None, :]
+                    rest_real_mat = np.stack([cond_to_real_mean[x] for x in rest], axis=0)
+                    cond_to_weight[c] = _deg_weights_condition_vs_rest(cond_real_vec, rest_real_mat)
+
+            for row in rows:
+                cond = row["condition"]
+                if cond not in valid_conds:
+                    continue
+                real_vec = cond_to_real_mean[cond]
+                pred_vec = cond_to_pred_mean[cond]
+                weight_vec = cond_to_weight.get(cond, np.zeros_like(real_vec))
+                if "wmse" in metrics:
+                    row["wmse"] = _wmse(real_vec, pred_vec, weight_vec)
+                if "weighted_r2_delta" in metrics:
+                    row["weighted_r2_delta"] = _weighted_r2_delta(real_vec, pred_vec, mu_all, weight_vec)
+                if "pearson_delta_pert" in metrics:
+                    row["pearson_delta_pert"] = _pearson_delta_pert(real_vec, pred_vec, mu_all)
+
+    if wants_pds and len(rows) > 0:
+        labels = [r["condition"] for r in rows if r["condition"] in cond_to_delta_real and r["condition"] in cond_to_delta_pred]
+        if len(labels) <= 1:
+            for r in rows:
+                r["pds_cosine"] = np.nan
+        else:
+            label_to_idx = {lab: i for i, lab in enumerate(labels)}
+            for row in rows:
+                cond = row["condition"]
+                if cond not in label_to_idx:
+                    row["pds_cosine"] = np.nan
+                    continue
+                i = label_to_idx[cond]
+                pred_eff = cond_to_delta_pred[cond]
+                dists = []
+                for other_cond in labels:
+                    real_eff = cond_to_delta_real[other_cond]
+                    d = _cosine_distance_safe(pred_eff, real_eff)
+                    dists.append(float(d))
+                dists_arr = np.asarray(dists, dtype=float)
+                if not np.any(np.isfinite(dists_arr)):
+                    row["pds_cosine"] = np.nan
+                    continue
+                row["pds_cosine"] = _rank_norm_score(dists_arr, correct_idx=i)
+
+    per_condition_df = pd.DataFrame(rows)
+    if per_condition_df.empty:
+        return per_condition_df
+
+    present_metrics = [m for m in metrics if m in per_condition_df.columns]
+    global_row: Dict[str, float | str | int] = {
+        "space": space,
+        "n_conditions": int(per_condition_df["condition"].nunique()),
+        "deg_fallback_used": bool(per_condition_df["deg_fallback_used"].any()),
+    }
+    for metric in present_metrics:
+        if metric == "cosine_logfc_rank":
+            labels = [
+                str(c)
+                for c in per_condition_df["condition"].tolist()
+                if str(c) in cond_to_delta_real and str(c) in cond_to_delta_pred
+            ]
+            global_row[metric] = _cosine_logfc_rank(
+                labels=labels,
+                cond_to_delta_real=cond_to_delta_real,
+                cond_to_delta_pred=cond_to_delta_pred,
+            )
+        elif metric == "matrix_distance":
+            labels = [
+                str(c)
+                for c in per_condition_df["condition"].tolist()
+                if str(c) in cond_to_delta_real and str(c) in cond_to_delta_pred
+            ]
+            if any(c not in cond_to_delta_real or c not in cond_to_delta_pred for c in labels):
+                global_row[metric] = np.nan
+                global_row["matrix_distance_raw"] = np.nan
+            else:
+                md_norm, md_raw, _, _, _ = _matrix_distance_from_deltas(
+                    labels=labels,
+                    cond_to_delta_real=cond_to_delta_real,
+                    cond_to_delta_pred=cond_to_delta_pred,
+                )
+                global_row[metric] = md_norm
+                global_row["matrix_distance_raw"] = md_raw
+        else:
+            global_row[metric] = float(per_condition_df[metric].mean())
+
+    return pd.DataFrame([global_row])
 
 
 def parse_args() -> argparse.Namespace:

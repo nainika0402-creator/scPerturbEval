@@ -40,3 +40,39 @@ Supported space-aware extras:
 - `deg_direction_agreement`
 - `deg_spearman_lfc`
 - `pds_cosine` (cosine-only perturbation discrimination score)
+
+## Aggregate fold metrics (mean/std)
+
+```bash
+python -m scPerturbEval.aggregate_fold_metrics \
+  --pattern "ckpts/additive/fold*/fold_metrics_space.csv" \
+  --out-per-fold results/fold_metrics_per_fold.csv \
+  --out-summary results/fold_metrics_summary.csv
+```
+
+You can also pass files directly:
+
+```bash
+python -m scPerturbEval.aggregate_fold_metrics \
+  --csv-paths ckpts/additive/fold0/fold_metrics_space.csv ckpts/additive/fold1/fold_metrics_space.csv
+```
+
+## Norman Baselines
+
+`run_norman_baselines` supports:
+- `control_baseline`
+- `global_delta`
+- `one_layer_mlp`
+
+Example (MLP baseline, 5000 steps):
+
+```bash
+python -m scPerturbEval.run_norman_baselines \
+  --processed-dir /path/to/processed_fold0 \
+  --baseline one_layer_mlp \
+  --steps 5000 \
+  --hidden-dim 1024 \
+  --lr 1e-3 \
+  --seed 42 \
+  --out-dir /path/to/out/fold0/one_layer_mlp
+```
