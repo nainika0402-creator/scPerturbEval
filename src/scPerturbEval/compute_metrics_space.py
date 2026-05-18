@@ -469,6 +469,7 @@ def compute_metrics_with_space(
     cond_to_delta_pred: dict[str, np.ndarray] = {}
     cond_to_real_mean: dict[str, np.ndarray] = {}
     cond_to_pred_mean: dict[str, np.ndarray] = {}
+    cond_to_real_cells: dict[str, np.ndarray] = {}
     cond_to_weight: dict[str, np.ndarray] = {}
     pert_metric_conditions: list[str] = []
     gene_names = [str(g) for g in pair.ref.var_names.astype(str).tolist()]
@@ -626,6 +627,7 @@ def compute_metrics_with_space(
             cond_name = condition[0]
             cond_to_real_mean[cond_name] = _safe_mean(tx_real)
             cond_to_pred_mean[cond_name] = _safe_mean(tx_pred)
+            cond_to_real_cells[cond_name] = tx_real
             pert_metric_conditions.append(cond_name)
 
     if any(m in pert_ref_metrics for m in metrics) and len(pert_metric_conditions) > 0:
@@ -639,9 +641,16 @@ def compute_metrics_with_space(
                 if len(rest) == 0:
                     cond_to_weight[c] = np.zeros_like(cond_to_real_mean[c], dtype=float)
                 else:
-                    cond_real_vec = cond_to_real_mean[c][None, :]
-                    rest_real_mat = np.stack([cond_to_real_mean[x] for x in rest], axis=0)
-                    cond_to_weight[c] = _deg_weights_condition_vs_rest(cond_real_vec, rest_real_mat)
+                    cond_real_mat = cond_to_real_cells.get(c)
+                    rest_mats = [cond_to_real_cells.get(x) for x in rest if x in cond_to_real_cells]
+                    if cond_real_mat is None or len(rest_mats) == 0:
+                        cond_to_weight[c] = np.zeros_like(cond_to_real_mean[c], dtype=float)
+                    else:
+                        try:
+                            rest_real_mat = np.vstack(rest_mats)
+                            cond_to_weight[c] = _deg_weights_condition_vs_rest(cond_real_mat, rest_real_mat)
+                        except Exception:
+                            cond_to_weight[c] = np.zeros_like(cond_to_real_mean[c], dtype=float)
 
             ref_vec = None
             if pathway_reference == "control":
