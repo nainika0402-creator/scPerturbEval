@@ -41,6 +41,16 @@ Supported space-aware extras:
 - `deg_spearman_lfc`
 - `pds_cosine` (cosine-only perturbation discrimination score)
 
+For `top_deg_recall`, `top_deg_precision`, `deg_direction_agreement`, and `deg_spearman_lfc`,
+the implementation uses DE-style comparisons (condition vs control in real and pred) with:
+- per-gene log2 fold-change
+- Welch t-test p-values
+- Benjamini-Hochberg FDR correction
+
+Useful flags:
+- `--deg-fdr-threshold` (default `0.05`)
+- `--lfc-eps` (default `1e-8`)
+
 ## Aggregate fold metrics (mean/std)
 
 ```bash

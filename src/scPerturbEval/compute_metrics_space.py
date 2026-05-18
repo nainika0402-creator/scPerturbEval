@@ -109,6 +109,51 @@ def _top_deg_recall_precision(delta_real: np.ndarray, delta_pred: np.ndarray, k:
     return float(recall), float(precision)
 
 
+def _benjamini_hochberg(pvals: np.ndarray) -> np.ndarray:
+    p = np.asarray(pvals, dtype=float)
+    n = p.size
+    if n == 0:
+        return p
+    order = np.argsort(p)
+    ranked = p[order]
+    adj = ranked * n / (np.arange(n) + 1.0)
+    adj = np.minimum.accumulate(adj[::-1])[::-1]
+    adj = np.clip(adj, 0.0, 1.0)
+    out = np.empty_like(adj)
+    out[order] = adj
+    return out
+
+
+def _de_table_from_matrices(
+    cond_x: np.ndarray,
+    ctrl_x: np.ndarray,
+    *,
+    lfc_eps: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    cond_mean = _safe_mean(cond_x)
+    ctrl_mean = _safe_mean(ctrl_x)
+    logfc = np.log2((cond_mean + lfc_eps) / (ctrl_mean + lfc_eps))
+    pvals, _ = ttest_ind(cond_x, ctrl_x, axis=0, equal_var=False, nan_policy="omit")
+    pvals = np.nan_to_num(np.asarray(pvals, dtype=float), nan=1.0, posinf=1.0, neginf=1.0)
+    fdr = _benjamini_hochberg(pvals)
+    return logfc, fdr
+
+
+def _de_sig_masks(
+    real_logfc: np.ndarray,
+    real_fdr: np.ndarray,
+    pred_logfc: np.ndarray,
+    pred_fdr: np.ndarray,
+    *,
+    fdr_threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    real_sig = np.asarray(real_fdr <= fdr_threshold, dtype=bool)
+    pred_sig = np.asarray(pred_fdr <= fdr_threshold, dtype=bool)
+    if real_sig.shape != real_logfc.shape or pred_sig.shape != pred_logfc.shape:
+        raise ValueError("DE arrays have inconsistent shapes.")
+    return real_sig, pred_sig
+
+
 def _direction_agreement(delta_real: np.ndarray, delta_pred: np.ndarray) -> float:
     return float(np.mean(np.sign(delta_real) == np.sign(delta_pred)))
 
@@ -349,6 +394,8 @@ def compute_metrics_with_space(
     deg_lfc: float = 0.25,
     deg_top_n: int = 0,
     top_k_deg: int = 50,
+    deg_fdr_threshold: float = 0.05,
+    lfc_eps: float = 1e-8,
     pathway_gene_sets: str = "MSigDB_Hallmark_2020",
     pathway_top_k: int = 10,
     pathway_reference: str = "perturbed_centroid",
@@ -425,6 +472,12 @@ def compute_metrics_with_space(
     cond_to_weight: dict[str, np.ndarray] = {}
     pert_metric_conditions: list[str] = []
     gene_names = [str(g) for g in pair.ref.var_names.astype(str).tolist()]
+    de_style_metrics = {
+        "top_deg_recall",
+        "top_deg_precision",
+        "deg_direction_agreement",
+        "deg_spearman_lfc",
+    }
 
     for condition in conditions:
         real_x, pred_x = extract_condition_matrices(pair, split=split, condition=condition, dense_mode="on_extract")
@@ -502,16 +555,52 @@ def compute_metrics_with_space(
                         cond_to_delta_real[condition[0]] = delta_real
                         cond_to_delta_pred[condition[0]] = delta_pred
 
+                    real_logfc = None
+                    real_fdr = None
+                    pred_logfc = None
+                    pred_fdr = None
+                    real_sig = None
+                    pred_sig = None
+                    if any(m in metrics for m in de_style_metrics):
+                        real_logfc, real_fdr = _de_table_from_matrices(
+                            tx_real,
+                            tx_ctrl_real,
+                            lfc_eps=lfc_eps,
+                        )
+                        pred_logfc, pred_fdr = _de_table_from_matrices(
+                            tx_pred,
+                            tx_ctrl_pred,
+                            lfc_eps=lfc_eps,
+                        )
+                        real_sig, pred_sig = _de_sig_masks(
+                            real_logfc,
+                            real_fdr,
+                            pred_logfc,
+                            pred_fdr,
+                            fdr_threshold=deg_fdr_threshold,
+                        )
+
                     if metric == "pcc_delta":
                         corr = pearsonr(delta_real, delta_pred)[0]
                         score = float(corr) if not np.isnan(corr) else np.nan
                     elif metric in {"top_deg_recall", "top_deg_precision"}:
-                        recall, precision = _top_deg_recall_precision(delta_real, delta_pred, top_k_deg)
-                        score = recall if metric == "top_deg_recall" else precision
+                        inter = int(np.sum(real_sig & pred_sig))
+                        recall_den = int(np.sum(real_sig))
+                        precision_den = int(np.sum(pred_sig))
+                        recall = (inter / recall_den) if recall_den > 0 else np.nan
+                        precision = (inter / precision_den) if precision_den > 0 else np.nan
+                        score = float(recall) if metric == "top_deg_recall" else float(precision)
                     elif metric == "deg_direction_agreement":
-                        score = _direction_agreement(delta_real, delta_pred)
+                        overlap = real_sig & pred_sig
+                        if int(np.sum(overlap)) == 0:
+                            score = np.nan
+                        else:
+                            score = float(np.mean(np.sign(real_logfc[overlap]) == np.sign(pred_logfc[overlap])))
                     elif metric == "deg_spearman_lfc":
-                        corr = spearmanr(delta_real, delta_pred)[0]
+                        if int(np.sum(real_sig)) == 0:
+                            corr = np.nan
+                        else:
+                            corr = spearmanr(real_logfc[real_sig], pred_logfc[real_sig])[0]
                         score = float(corr) if not np.isnan(corr) else np.nan
                     elif metric in {"pds_cosine", "cosine_logfc_rank", "matrix_distance"}:
                         score = np.nan
@@ -676,7 +765,6 @@ def compute_metrics_with_space(
                 global_row["matrix_distance_raw"] = md_raw
         elif metric in {"pathway_nes_spearman", "pathway_topk_jaccard"}:
             global_row[metric] = float(per_condition_df[metric].mean())
-            global_row[f"{metric}_median"] = float(per_condition_df[metric].median())
         else:
             global_row[metric] = float(per_condition_df[metric].mean())
 
@@ -709,6 +797,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deg-top-n", type=int, default=0, help="Optional cap on number of DEGs (0 = no cap)")
     parser.add_argument("--top-k-deg", type=int, default=50, help="K for top DEG recall/precision metrics")
     parser.add_argument(
+        "--deg-fdr-threshold",
+        type=float,
+        default=0.05,
+        help="FDR threshold for DE-table metrics (top_deg_recall/precision, direction, spearman_lfc).",
+    )
+    parser.add_argument(
+        "--lfc-eps",
+        type=float,
+        default=1e-8,
+        help="Small epsilon used in log2 fold-change calculations.",
+    )
+    parser.add_argument(
         "--pathway-gene-sets",
         default="MSigDB_Hallmark_2020",
         help="GSEApy gene sets name or GMT path for pathway recovery metrics.",
@@ -739,6 +839,8 @@ def main() -> None:
         deg_lfc=args.deg_lfc,
         deg_top_n=args.deg_top_n,
         top_k_deg=args.top_k_deg,
+        deg_fdr_threshold=args.deg_fdr_threshold,
+        lfc_eps=args.lfc_eps,
         pathway_gene_sets=args.pathway_gene_sets,
         pathway_top_k=args.pathway_top_k,
         pathway_reference=args.pathway_reference,
