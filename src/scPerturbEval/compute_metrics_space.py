@@ -27,6 +27,8 @@ SPACE_EXTRA_METRICS = {
     "wmse",
     "weighted_r2_delta",
     "pearson_delta_pert",
+    "pathway_nes_spearman",
+    "pathway_topk_jaccard",
 }
 
 
@@ -207,6 +209,85 @@ def _deg_weights_condition_vs_rest(
     return weights / wsum
 
 
+def _compute_delta(vec: np.ndarray, reference_vec: np.ndarray) -> np.ndarray:
+    return vec - reference_vec
+
+
+def _make_ranked_gene_list(delta_vec: np.ndarray, gene_names: list[str]) -> pd.DataFrame:
+    if len(delta_vec) != len(gene_names):
+        raise ValueError("delta vector and gene_names length mismatch")
+    df = pd.DataFrame({"gene": gene_names, "score": delta_vec})
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["gene", "score"])
+    df = df.sort_values("score", ascending=False)
+    df = df.drop_duplicates(subset=["gene"], keep="first")
+    return df
+
+
+def _run_prerank_gsea(ranked_df: pd.DataFrame, gene_sets: str, min_genes: int = 20) -> pd.DataFrame | None:
+    if ranked_df.shape[0] < min_genes:
+        return None
+    try:
+        import gseapy as gp
+    except Exception:
+        return None
+    try:
+        pre_res = gp.prerank(
+            rnk=ranked_df[["gene", "score"]],
+            gene_sets=gene_sets,
+            min_size=5,
+            max_size=5000,
+            permutation_num=200,
+            seed=0,
+            verbose=False,
+        )
+    except Exception:
+        return None
+    if pre_res is None or getattr(pre_res, "res2d", None) is None:
+        return None
+    res = pre_res.res2d.copy()
+    if res is None or len(res) == 0:
+        return None
+    return res
+
+
+def _extract_nes_vector(gsea_df: pd.DataFrame | None) -> pd.Series:
+    if gsea_df is None or len(gsea_df) == 0:
+        return pd.Series(dtype=float)
+    if "NES" not in gsea_df.columns:
+        return pd.Series(dtype=float)
+    if "Term" in gsea_df.columns:
+        s = gsea_df.set_index("Term")["NES"]
+    else:
+        s = gsea_df["NES"]
+        if gsea_df.index is not None:
+            s.index = gsea_df.index.astype(str)
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    return s
+
+
+def _pathway_nes_spearman(real_nes: pd.Series, pred_nes: pd.Series) -> float:
+    all_terms = sorted(set(real_nes.index.astype(str)).union(set(pred_nes.index.astype(str))))
+    if len(all_terms) == 0:
+        return np.nan
+    real_v = real_nes.reindex(all_terms, fill_value=0.0).to_numpy(dtype=float)
+    pred_v = pred_nes.reindex(all_terms, fill_value=0.0).to_numpy(dtype=float)
+    if float(np.std(real_v)) == 0.0 or float(np.std(pred_v)) == 0.0:
+        return np.nan
+    corr = spearmanr(real_v, pred_v)[0]
+    return float(corr) if not np.isnan(corr) else np.nan
+
+
+def _pathway_topk_jaccard(real_nes: pd.Series, pred_nes: pd.Series, top_k: int = 10) -> float:
+    if len(real_nes) == 0 or len(pred_nes) == 0:
+        return np.nan
+    real_top = set(real_nes.abs().sort_values(ascending=False).head(top_k).index.astype(str))
+    pred_top = set(pred_nes.abs().sort_values(ascending=False).head(top_k).index.astype(str))
+    denom = len(real_top | pred_top)
+    if denom == 0:
+        return np.nan
+    return float(len(real_top & pred_top) / denom)
+
+
 def _cosine_logfc_rank(
     labels: list[str],
     cond_to_delta_real: dict[str, np.ndarray],
@@ -268,6 +349,9 @@ def compute_metrics_with_space(
     deg_lfc: float = 0.25,
     deg_top_n: int = 0,
     top_k_deg: int = 50,
+    pathway_gene_sets: str = "MSigDB_Hallmark_2020",
+    pathway_top_k: int = 10,
+    pathway_reference: str = "perturbed_centroid",
 ) -> pd.DataFrame:
     spec = DatasetSpec(
         condition_columns=[condition_column],
@@ -297,7 +381,13 @@ def compute_metrics_with_space(
         "cosine_logfc_rank",
         "matrix_distance",
     }
-    pert_ref_metrics = {"wmse", "weighted_r2_delta", "pearson_delta_pert"}
+    pert_ref_metrics = {
+        "wmse",
+        "weighted_r2_delta",
+        "pearson_delta_pert",
+        "pathway_nes_spearman",
+        "pathway_topk_jaccard",
+    }
     needs_control = (space == "deg") or any(m in control_ref_metrics for m in metrics)
     if needs_control and control_label is None:
         raise ValueError(
@@ -334,6 +424,7 @@ def compute_metrics_with_space(
     cond_to_pred_mean: dict[str, np.ndarray] = {}
     cond_to_weight: dict[str, np.ndarray] = {}
     pert_metric_conditions: list[str] = []
+    gene_names = [str(g) for g in pair.ref.var_names.astype(str).tolist()]
 
     for condition in conditions:
         real_x, pred_x = extract_condition_matrices(pair, split=split, condition=condition, dense_mode="on_extract")
@@ -463,6 +554,19 @@ def compute_metrics_with_space(
                     rest_real_mat = np.stack([cond_to_real_mean[x] for x in rest], axis=0)
                     cond_to_weight[c] = _deg_weights_condition_vs_rest(cond_real_vec, rest_real_mat)
 
+            ref_vec = None
+            if pathway_reference == "control":
+                if ctrl_real_x is not None:
+                    ref_vec = _safe_mean(ctrl_real_x)
+            elif pathway_reference in {"perturbed_mean", "perturbed_centroid"}:
+                ref_vec = mu_all
+            else:
+                raise ValueError(
+                    "pathway_reference must be one of {'control','perturbed_mean','perturbed_centroid'}"
+                )
+            if ref_vec is None:
+                ref_vec = mu_all
+
             for row in rows:
                 cond = row["condition"]
                 if cond not in valid_conds:
@@ -476,6 +580,35 @@ def compute_metrics_with_space(
                     row["weighted_r2_delta"] = _weighted_r2_delta(real_vec, pred_vec, mu_all, weight_vec)
                 if "pearson_delta_pert" in metrics:
                     row["pearson_delta_pert"] = _pearson_delta_pert(real_vec, pred_vec, mu_all)
+                if "pathway_nes_spearman" in metrics or "pathway_topk_jaccard" in metrics:
+                    if space != "raw":
+                        row["pathway_nes_spearman"] = np.nan
+                        row["pathway_topk_jaccard"] = np.nan
+                        row["n_real_pathways"] = 0
+                        row["n_pred_pathways"] = 0
+                    else:
+                        try:
+                            real_delta = _compute_delta(real_vec, ref_vec)
+                            pred_delta = _compute_delta(pred_vec, ref_vec)
+                            real_ranked = _make_ranked_gene_list(real_delta, gene_names)
+                            pred_ranked = _make_ranked_gene_list(pred_delta, gene_names)
+                            real_gsea = _run_prerank_gsea(real_ranked, pathway_gene_sets)
+                            pred_gsea = _run_prerank_gsea(pred_ranked, pathway_gene_sets)
+                            real_nes = _extract_nes_vector(real_gsea)
+                            pred_nes = _extract_nes_vector(pred_gsea)
+                            row["n_real_pathways"] = int(len(real_nes))
+                            row["n_pred_pathways"] = int(len(pred_nes))
+                            if "pathway_nes_spearman" in metrics:
+                                row["pathway_nes_spearman"] = _pathway_nes_spearman(real_nes, pred_nes)
+                            if "pathway_topk_jaccard" in metrics:
+                                row["pathway_topk_jaccard"] = _pathway_topk_jaccard(
+                                    real_nes, pred_nes, top_k=pathway_top_k
+                                )
+                        except Exception:
+                            row["pathway_nes_spearman"] = np.nan
+                            row["pathway_topk_jaccard"] = np.nan
+                            row["n_real_pathways"] = 0
+                            row["n_pred_pathways"] = 0
 
     if wants_pds and len(rows) > 0:
         labels = [r["condition"] for r in rows if r["condition"] in cond_to_delta_real and r["condition"] in cond_to_delta_pred]
@@ -541,6 +674,9 @@ def compute_metrics_with_space(
                 )
                 global_row[metric] = md_norm
                 global_row["matrix_distance_raw"] = md_raw
+        elif metric in {"pathway_nes_spearman", "pathway_topk_jaccard"}:
+            global_row[metric] = float(per_condition_df[metric].mean())
+            global_row[f"{metric}_median"] = float(per_condition_df[metric].median())
         else:
             global_row[metric] = float(per_condition_df[metric].mean())
 
@@ -572,6 +708,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deg-lfc", type=float, default=0.25, help="Absolute log2 fold-change threshold for DEG space")
     parser.add_argument("--deg-top-n", type=int, default=0, help="Optional cap on number of DEGs (0 = no cap)")
     parser.add_argument("--top-k-deg", type=int, default=50, help="K for top DEG recall/precision metrics")
+    parser.add_argument(
+        "--pathway-gene-sets",
+        default="MSigDB_Hallmark_2020",
+        help="GSEApy gene sets name or GMT path for pathway recovery metrics.",
+    )
+    parser.add_argument("--pathway-top-k", type=int, default=10, help="Top-K pathways for pathway Jaccard.")
+    parser.add_argument(
+        "--pathway-reference",
+        choices=["control", "perturbed_mean", "perturbed_centroid"],
+        default="perturbed_centroid",
+        help="Reference used to compute pathway deltas.",
+    )
     parser.add_argument("--min-cells", type=int, default=1, help="Minimum cells per condition")
     parser.add_argument("--out", default="results/metrics_space.csv", help="Output CSV")
     return parser.parse_args()
@@ -591,6 +739,9 @@ def main() -> None:
         deg_lfc=args.deg_lfc,
         deg_top_n=args.deg_top_n,
         top_k_deg=args.top_k_deg,
+        pathway_gene_sets=args.pathway_gene_sets,
+        pathway_top_k=args.pathway_top_k,
+        pathway_reference=args.pathway_reference,
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
