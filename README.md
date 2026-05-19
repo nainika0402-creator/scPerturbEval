@@ -31,3 +31,15 @@ For complete step-by-step instructions, examples, and troubleshooting, see:
 
 - [`USER_MANUAL.md`](./USER_MANUAL.md)
 
+## Notebook Note
+
+If you run Colab/Jupyter notebooks, use:
+
+```bash
+python -m scPerturbEval.evaluations ...
+```
+
+instead of older calls like `scPerturbEval.compute_metrics_space`.
+
+Example notebook:
+- `notebooks/scdfm_metrics_run.ipynb` shows an end-to-end fold-wise evaluation workflow (raw + PCA passes) and cross-fold aggregation.
