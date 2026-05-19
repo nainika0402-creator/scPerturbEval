@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .compute_metrics_space import compute_metrics_with_space
+from .metrics import compute_metrics_with_space
 
 
 ALLOWED_METRICS = [

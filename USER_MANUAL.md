@@ -81,7 +81,6 @@ Baseline outputs:
 
 Use the curated metric entry point:
 - `python -m scPerturbEval.evaluations`
-- Core metric implementation module: `src/scPerturbEval/metrics.py`
 
 Spaces:
 - `raw`

@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse
 
-from scPerturbEval.compute_metrics import compute_metrics
+from scPerturbEval.metrics import compute_metrics_with_space
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,12 +31,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    df = compute_metrics(
+    df = compute_metrics_with_space(
         real_path=Path(args.real),
         pred_path=Path(args.pred),
         condition_column=args.condition_column,
         metrics=args.metrics,
         min_cells_per_condition=args.min_cells,
+        space="raw",
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ from scipy.stats import pearsonr
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
 
-from .compute_metrics import DISTRIBUTION_METRICS, VECTOR_METRICS, _distribution_metric, _vector_metric
+from .core_metrics import DISTRIBUTION_METRICS, VECTOR_METRICS, _distribution_metric, _vector_metric
 from .loader import DatasetSpec, LoaderPolicy, PairedAnnDataLoader, extract_condition_matrices
 
 SPACE_EXTRA_METRICS = {
