@@ -435,7 +435,12 @@ def compute_metrics_with_space(
         "pathway_nes_spearman",
         "pathway_topk_jaccard",
     }
-    needs_control = (space == "deg") or any(m in control_ref_metrics for m in metrics)
+    needs_control = (
+        (space == "deg")
+        or any(m in control_ref_metrics for m in metrics)
+        or ("pathway_nes_spearman" in metrics and pathway_reference == "control")
+        or ("pathway_topk_jaccard" in metrics and pathway_reference == "control")
+    )
     if needs_control and control_label is None:
         raise ValueError(
             "control_label is required for DEG space and delta/DEG metrics "
@@ -533,19 +538,19 @@ def compute_metrics_with_space(
                     raise ValueError(
                         f"Metric '{metric}' is not supported in PCA space because gene identity is not preserved."
                     )
-                if ctrl_real_x is None or ctrl_pred_x is None:
-                    raise ValueError(
-                        f"Metric '{metric}' requires a valid control condition from --control-label."
-                    )
-                if tx_ctrl_real is None or tx_ctrl_pred is None:
-                    raise ValueError(
-                        f"Metric '{metric}' requires control-transformed matrices in non-PCA space."
-                    )
-                if is_control_condition:
-                    row[metric] = np.nan
-                    continue
-
                 if metric in control_ref_metrics:
+                    if ctrl_real_x is None or ctrl_pred_x is None:
+                        raise ValueError(
+                            f"Metric '{metric}' requires a valid control condition from --control-label."
+                        )
+                    if tx_ctrl_real is None or tx_ctrl_pred is None:
+                        raise ValueError(
+                            f"Metric '{metric}' requires control-transformed matrices in non-PCA space."
+                        )
+                    if is_control_condition:
+                        row[metric] = np.nan
+                        continue
+
                     delta_real, delta_pred = _compute_deltas(
                         tx_real=tx_real,
                         tx_pred=tx_pred,
