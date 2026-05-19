@@ -3,6 +3,10 @@
 `scPerturbEval` is a lightweight evaluation framework for single-cell perturbation prediction.
 It supports paired `real/pred` `.h5ad` evaluation, fold-level aggregation, and baseline workflows.
 
+# Slides
+
+Link to presentation slides: 
+
 ## What this repo includes
 
 - Metric evaluation in `raw`, `pca`, and `deg` spaces.
@@ -38,8 +42,6 @@ If you run Colab/Jupyter notebooks, use:
 ```bash
 python -m scPerturbEval.evaluations ...
 ```
-
-instead of older calls like `scPerturbEval.compute_metrics_space`.
 
 Example notebook:
 - `notebooks/scdfm_metrics_run.ipynb` shows an end-to-end fold-wise evaluation workflow (raw + PCA passes) and cross-fold aggregation.
